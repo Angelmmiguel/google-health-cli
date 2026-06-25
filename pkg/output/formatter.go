@@ -49,8 +49,15 @@ func PrintToFile(format string, data json.RawMessage, filePath string) error {
 	case "csv":
 		rows := flattenRows(extractRows(data))
 		if len(rows) == 0 {
+			// Empty tabular result → write an empty CSV file (never a JSON dump);
+			// non-tabular → JSON fallback so the file stays readable.
+			if isListShaped(data) {
+				fwarnDroppedSignals(os.Stderr, data)
+				return writeFileWithSummary(filePath, nil, format, 0, nil)
+			}
 			return writeFileWithSummary(filePath, data, format, 0, nil)
 		}
+		fwarnDroppedSignals(os.Stderr, data)
 		if err := printRowsAsCSV(&buf, rows); err != nil {
 			return err
 		}
@@ -180,8 +187,11 @@ func PrintJSON(data json.RawMessage) error {
 func PrintTable(data json.RawMessage) error {
 	rows := extractRows(data)
 	if len(rows) == 0 {
+		// Non-tabular or empty: table mode is for humans, so the JSON fallback
+		// stays readable and keeps _hints visible.
 		return PrintJSON(data)
 	}
+	fwarnDroppedSignals(os.Stderr, data)
 	return printRowsAsTable(os.Stdout, rows)
 }
 
@@ -269,14 +279,62 @@ func formatValue(v interface{}) string {
 	}
 }
 
-// PrintCSV outputs data as CSV.
+// PrintCSV outputs data as CSV, keeping the stream pure for dataframe readers:
+// an empty list-shaped result emits nothing (never a JSON object dumped into the
+// CSV stream), and a non-tabular response (e.g. auth status) falls back to JSON.
+// _hints and a leftover nextPageToken are surfaced on stderr, not in the data.
 func PrintCSV(data json.RawMessage) error {
 	rows := extractRows(data)
 	if len(rows) == 0 {
-		return PrintJSON(data)
+		if isListShaped(data) {
+			fwarnDroppedSignals(os.Stderr, data)
+			return nil // empty tabular result → empty CSV, not a JSON dump
+		}
+		return PrintJSON(data) // non-tabular: nothing to tabulate
 	}
-	rows = flattenRows(rows)
-	return printRowsAsCSV(os.Stdout, rows)
+	fwarnDroppedSignals(os.Stderr, data)
+	return printRowsAsCSV(os.Stdout, flattenRows(rows))
+}
+
+// isListShaped reports whether data is a tabular response — a top-level array,
+// or an object carrying a row-array key — even when that array is empty. It
+// distinguishes an empty result (emit an empty CSV) from a non-tabular object
+// such as auth status (fall back to JSON).
+func isListShaped(data json.RawMessage) bool {
+	var arr []json.RawMessage
+	if json.Unmarshal(data, &arr) == nil {
+		return true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(data, &obj) != nil {
+		return false
+	}
+	for _, key := range []string{"dataPoints", "rollupDataPoints", "data", "items"} {
+		if _, ok := obj[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fwarnDroppedSignals surfaces _hints and a leftover nextPageToken on w when
+// tabular output renders only the rows. Without this, CSV/table mode silently
+// hides the truncation signal that JSON mode carries in-band — an agent reading
+// the CSV stream would misreport a --limit-capped result as complete.
+func fwarnDroppedSignals(w io.Writer, data json.RawMessage) {
+	var obj struct {
+		Hints         []string `json:"_hints"`
+		NextPageToken string   `json:"nextPageToken"`
+	}
+	if json.Unmarshal(data, &obj) != nil {
+		return
+	}
+	for _, h := range obj.Hints {
+		fmt.Fprintf(w, "hint: %s\n", h)
+	}
+	if obj.NextPageToken != "" {
+		fmt.Fprintf(w, "nextPageToken: %s\n", obj.NextPageToken)
+	}
 }
 
 // flattenRows expands nested objects into dot-separated column names

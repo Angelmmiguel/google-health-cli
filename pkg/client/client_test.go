@@ -24,14 +24,19 @@ import (
 )
 
 type fakeTokenSource struct {
-	token string
-	err   error
-	calls int
+	token         string
+	err           error
+	calls         int
+	invalidations int
 }
 
 func (f *fakeTokenSource) Token() (string, error) {
 	f.calls++
 	return f.token, f.err
+}
+
+func (f *fakeTokenSource) Invalidate() {
+	f.invalidations++
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -50,6 +55,110 @@ func stubSleep(t *testing.T) {
 	orig := sleep
 	sleep = func(time.Duration) {}
 	t.Cleanup(func() { sleep = orig })
+}
+
+// A server-side-stale access token can surface as a 403 "insufficient
+// authentication scopes" rather than a 401 (the oauth2 library's ~10s
+// expiry-skew window, observed live). The stale-scope variant must earn exactly
+// one token refresh + retry, like a 401.
+func TestDo_StaleScopeForbiddenRefreshesOnce(t *testing.T) {
+	stubSleep(t)
+	ts := &fakeTokenSource{token: "tok"}
+	attempts := 0
+	c := newTestClient(ts, func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{
+				StatusCode: 403,
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"code":403,"message":"Request had insufficient authentication scopes.","status":"PERMISSION_DENIED"}}`)),
+				Header: http.Header{},
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Header:     http.Header{},
+		}, nil
+	})
+
+	resp, err := c.Do(&Request{Method: "GET", Path: "/x"})
+	if err != nil {
+		t.Fatalf("expected success after refresh+retry, got %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if ts.invalidations != 1 {
+		t.Errorf("token invalidated %d times, want 1", ts.invalidations)
+	}
+	if attempts != 2 {
+		t.Errorf("transport attempted %d times, want 2", attempts)
+	}
+}
+
+// The refresh is one-shot across BOTH the 401 and 403 handlers: a 401 followed
+// by a persistent stale-scope 403 must refresh exactly once, then surface the
+// 403 (not loop). Guards the shared `refreshed` flag.
+func TestDo_RefreshIsOneShotAcross401Then403(t *testing.T) {
+	stubSleep(t)
+	ts := &fakeTokenSource{token: "tok"}
+	attempts := 0
+	c := newTestClient(ts, func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)), Header: http.Header{}}, nil
+		}
+		// After the one allowed refresh, the token is still stale-scoped.
+		return &http.Response{
+			StatusCode: 403,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"status":"PERMISSION_DENIED","message":"Request had insufficient authentication scopes."}}`)),
+			Header:     http.Header{},
+		}, nil
+	})
+
+	_, err := c.Do(&Request{Method: "GET", Path: "/x"})
+	if err == nil {
+		t.Fatal("expected the persistent 403 to surface as an error")
+	}
+	if ts.invalidations != 1 {
+		t.Errorf("token invalidated %d times, want exactly 1 (one-shot across 401+403)", ts.invalidations)
+	}
+	if attempts != 2 {
+		t.Errorf("transport attempted %d times, want 2 (401 → refresh → 403, no further retry)", attempts)
+	}
+}
+
+// A policy-denial 403 (not the stale-scope variant) must NOT trigger a refresh
+// or retry — it fails immediately as an API error.
+func TestDo_PolicyForbiddenDoesNotRetry(t *testing.T) {
+	stubSleep(t)
+	ts := &fakeTokenSource{token: "tok"}
+	attempts := 0
+	c := newTestClient(ts, func(*http.Request) (*http.Response, error) {
+		attempts++
+		return &http.Response{
+			StatusCode: 403,
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"code":403,"message":"Health API has not been used in project 123 before or it is disabled.","status":"PERMISSION_DENIED"}}`)),
+			Header: http.Header{},
+		}, nil
+	})
+
+	_, err := c.Do(&Request{Method: "GET", Path: "/x"})
+	var cliErr *CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("got %T (%v), want *CLIError", err, err)
+	}
+	if cliErr.Code != ExitAPIError {
+		t.Errorf("exit code = %d, want %d (api)", cliErr.Code, ExitAPIError)
+	}
+	if ts.invalidations != 0 {
+		t.Errorf("token invalidated %d times, want 0", ts.invalidations)
+	}
+	if attempts != 1 {
+		t.Errorf("transport attempted %d times, want 1 (policy 403s never retry)", attempts)
+	}
 }
 
 // A deterministic auth failure (token acquisition) must fail fast with the

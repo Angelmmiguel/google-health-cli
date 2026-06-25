@@ -69,6 +69,14 @@ ghealth user settings get   # → timeZone: "Europe/London", utcOffset: "3600s"
 ghealth data sleep list --limit 5    # CLI handles pagination internally
 ```
 
+**Paging through large `list` results.** `list` returns up to `--limit` rows (default 500). When more exist, the response carries a `nextPageToken` and a hint. Pass it back with `--page-token` to fetch the next page — it resumes exactly where the last page ended, no rows skipped or repeated:
+```bash
+ghealth data heart-rate list --from 2026-06-15 --limit 500
+#   → {"dataPoints":[…500…], "nextPageToken":"ABC", "_hints":[…]}
+ghealth data heart-rate list --from 2026-06-15 --limit 500 --page-token ABC
+#   → next 500 rows
+```
+
 **Correlate heart rate with exercise sessions:**
 ```bash
 # 1. Get exercise time window
@@ -124,6 +132,16 @@ ghealth data exercise list --from 2026-03-01 --format csv -o exercise.csv
 # Heart rate — 500 readings straight to file
 ghealth data heart-rate list --from today --limit 500 --format csv -o hr.csv
 ```
+
+**Exercise time series (GPS/heart-rate track) → CSV.** `export-tcx --as csv` flattens the TCX track to one row per trackpoint — `pd.read_csv` it directly instead of parsing TCX XML:
+
+```bash
+# Find the exercise id first, then export its track
+ghealth data exercise list --from 2026-06-01 --limit 10
+ghealth data exercise export-tcx --id <id> --output ride.csv --as csv   # or --output - for stdout
+```
+
+Columns (fixed, stable for dataframes): `time, activity, lap, sport, latitude_deg, longitude_deg, altitude_m, distance_m, heart_rate_bpm, cadence_rpm, speed_mps, watts`. Absent sensors are empty cells (NaN in pandas), never zeros. `distance_m` is cumulative. **0 rows = indoor/no-sensor activity** (Google emits no track for those) — the session summary and workout notes come from `data exercise list`, not the track export.
 
 ## Writing data
 

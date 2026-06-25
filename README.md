@@ -18,8 +18,8 @@ ghealth schema types                                       # See all available d
 ## Installation
 
 ```bash
-git clone https://github.com/OWNER/ghealth.git
-cd ghealth
+git clone https://github.com/Google-Health-API/google-health-cli.git
+cd google-health-cli
 go build -o ghealth .
 ```
 
@@ -78,7 +78,7 @@ ghealth auth login --non-interactive --scopes-preset readonly
 #    Copy either the full redirected URL or just the 'code' query parameter.
 
 # 3. Back on the ghealth host (both forms work):
-ghealth auth login --complete 'http://127.0.0.1/?code=4/0AX4XfWh...&state=cQq...'
+ghealth auth login --complete 'http://localhost/?code=4/0AX4XfWh...&state=cQq...'
 ghealth auth login --complete 4/0AX4XfWh...
 # → state validated, PKCE verifier sent on exchange, tokens persisted.
 ```
@@ -184,6 +184,15 @@ ghealth setup --instructions
 | `calories-in-heart-rate-zone` | *(rollup only — `caloriesInHeartRateZones` array per bucket)* | rollup, daily-rollup, reconcile |
 | `daily-heart-rate-zones` | *(reconcile only)* | reconcile |
 
+### Exercise track export
+
+`export-tcx` writes the raw Google TCX, or — with `--as csv` — flattens it to one row per trackpoint (`time, activity, lap, sport, latitude_deg, longitude_deg, altitude_m, distance_m, heart_rate_bpm, cadence_rpm, speed_mps, watts`) for direct `pd.read_csv` consumption. Indoor activities have no track and yield a header-only CSV; their summary/notes live in `data exercise list`. Pass `--output -` to stream to stdout instead of a file.
+
+```bash
+ghealth data exercise export-tcx --id <id> --output ride.csv --as csv
+ghealth data exercise export-tcx --id <id> --output - --as csv | head   # stream to stdout
+```
+
 ## Usage
 
 ### Reading data
@@ -206,6 +215,15 @@ ghealth data sleep list --limit 5
 ghealth data sleep list --limit 5 --detail
 ```
 
+Every read (`list`, `get`, `rollup`, `daily-rollup`, `reconcile`) returns the same JSON shape — an object `{"dataPoints": [...]}` with optional `_hints` and `nextPageToken` — so the rows are always under `dataPoints`.
+
+`list` returns up to `--limit` rows (default 500). When more exist it includes a `nextPageToken`; pass it back with `--page-token` to fetch the next page losslessly (no rows skipped or repeated):
+
+```bash
+ghealth data heart-rate list --from 2026-06-15 --limit 500            # → {"dataPoints":[…], "nextPageToken":"ABC"}
+ghealth data heart-rate list --from 2026-06-15 --limit 500 --page-token ABC
+```
+
 ### Important: list vs daily-rollup
 
 Some types (steps, distance) return **time intervals without values** from `list`. Use `daily-rollup` to get totals:
@@ -216,7 +234,7 @@ ghealth data steps list --from today --limit 5
 
 # This returns daily totals with actual counts:
 ghealth data steps daily-rollup --from 2026-03-22 --to 2026-03-29
-# → [{"date": "2026-03-28", "countSum": "9037"}, ...]
+# → {"dataPoints": [{"date": "2026-03-28", "countSum": "9037"}, ...]}
 ```
 
 ### Gotcha: missing days are NOT zeros
@@ -277,19 +295,24 @@ ghealth data heart-rate list --from today --limit 2
 ghealth data steps daily-rollup --from 2026-03-26 --to 2026-03-29
 ```
 ```json
-[
-  {"date": "2026-03-28", "countSum": "9037"},
-  {"date": "2026-03-27", "countSum": "2408"},
-  {"date": "2026-03-26", "countSum": "6474"}
-]
+{
+  "dataPoints": [
+    {"date": "2026-03-28", "countSum": "9037"},
+    {"date": "2026-03-27", "countSum": "2408"},
+    {"date": "2026-03-26", "countSum": "6474"}
+  ]
+}
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--raw` | Return the original API response with no simplification |
 | `--format table` | Aligned columns |
-| `--format csv` | CSV output |
+| `--format csv` | CSV output (nested objects flatten to dot-separated columns) |
+| `-o, --output <file>` | Write data to the file; print only a column schema + 3-row preview to stdout. Prefer this over `> file` (which gives the file but no schema) |
 | `--dry-run` | Show the HTTP request without executing |
+
+In `--format csv` and `--format table`, the data stream stays pure: `_hints` and a leftover `nextPageToken` are written to **stderr** rather than mixed into the rows, and an empty result emits an empty CSV (never a JSON object). Use `-o <file>` and the stderr signals together to page through a large export without polluting the CSV.
 
 ## AI Agent Skills
 
@@ -297,11 +320,11 @@ The repo ships 2 Agent Skills (`SKILL.md` files) — one for shared prerequisite
 
 ```bash
 # Install all skills at once
-npx skills add https://github.com/OWNER/ghealth
+npx skills add https://github.com/Google-Health-API/google-health-cli
 
 # Or pick only what you need
-npx skills add https://github.com/OWNER/ghealth/tree/main/skills/ghealth
-npx skills add https://github.com/OWNER/ghealth/tree/main/skills/ghealth-shared
+npx skills add https://github.com/Google-Health-API/google-health-cli/tree/main/skills/ghealth
+npx skills add https://github.com/Google-Health-API/google-health-cli/tree/main/skills/ghealth-shared
 ```
 
 
@@ -326,7 +349,12 @@ ghealth schema types                     # All data types + operations
 ghealth schema type heart-rate           # Detail for one type
 ghealth schema scopes                    # OAuth scopes
 ghealth schema endpoints                 # All API endpoints
+ghealth config show                      # Show active configuration (project, scopes, format)
+ghealth config set timezone <IANA zone>  # Set a config value (keys: project_id, format, timezone)
+ghealth webhooks subscribers list        # Manage push-notification subscribers / subscriptions
 ```
+
+`webhooks` (subscribers, subscriptions, `verify`) manages project-level push notifications and requires the `cloud-platform` scope plus a configured project ID — see the skill docs for details.
 
 ### Verifying tokens
 
@@ -364,4 +392,4 @@ Errors are always JSON on stderr and may include a `next_steps: []string` array 
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE.md).

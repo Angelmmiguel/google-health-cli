@@ -61,6 +61,9 @@ type DataType struct {
 	// calories-in-heart-rate-zone). All other rollup-capable types are
 	// capped at 90 days.
 	ShortRollupRange bool `json:"short_rollup_range,omitempty"`
+	// SmallPageCap marks types whose list pageSize the API caps at 25
+	// (exercise, sleep). All other types allow up to 10000 per page.
+	SmallPageCap bool `json:"small_page_cap,omitempty"`
 }
 
 // RollupRangeCapDays returns the API's maximum rollup/dailyRollup range for
@@ -70,6 +73,15 @@ func (d *DataType) RollupRangeCapDays() int {
 		return 14
 	}
 	return 90
+}
+
+// MaxPageSize returns the largest list pageSize the API accepts for this type:
+// 25 for the small-page set (exercise, sleep), 10000 for everything else.
+func (d *DataType) MaxPageSize() int {
+	if d.SmallPageCap {
+		return 25
+	}
+	return 10000
 }
 
 // ensureUTC appends "Z" to a timestamp if it doesn't already have a timezone.
@@ -242,10 +254,11 @@ func init() {
 	})
 	register(&DataType{
 		ID: "exercise", FilterName: "exercise", TimeField: interval,
-		Category:    "activity_and_fitness",
-		Description: "Exercise and workout sessions",
-		Operations:  []string{"list", "get", "create", "update", "delete", "reconcile", "export-tcx"},
-		Writable:    true,
+		Category:     "activity_and_fitness",
+		Description:  "Exercise and workout sessions",
+		Operations:   []string{"list", "get", "create", "update", "delete", "reconcile", "export-tcx"},
+		Writable:     true,
+		SmallPageCap: true, // API caps exercise list at 25 rows/page
 	})
 	register(&DataType{
 		ID: "distance", FilterName: "distance", TimeField: interval,
@@ -360,11 +373,12 @@ func init() {
 
 	register(&DataType{
 		ID: "sleep", FilterName: "sleep", TimeField: interval,
-		Category:    "sleep",
-		Description: "Sleep sessions with stages, summary, and duration",
-		Operations:  []string{"list", "get", "create", "update", "delete", "reconcile"},
-		Writable:    true,
-		FilterField: "sleep.interval.civil_end_time", // sleep only supports end_time filtering
+		Category:     "sleep",
+		Description:  "Sleep sessions with stages, summary, and duration",
+		Operations:   []string{"list", "get", "create", "update", "delete", "reconcile"},
+		Writable:     true,
+		FilterField:  "sleep.interval.civil_end_time", // sleep only supports end_time filtering
+		SmallPageCap: true,                            // API caps sleep list at 25 rows/page
 	})
 
 	// --- Daily summaries (date-based, no interval or sample time) ---

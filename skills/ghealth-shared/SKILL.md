@@ -124,7 +124,7 @@ ghealth webhooks <subcommand>
 | `--dry-run` | Print HTTP request without executing |
 | `--profile <name>` | Use named config profile |
 
-`list` also accepts: `--limit N` (max total results, default 500), `--from`, `--to`, `--filter`, `--detail` (sleep).
+`list` also accepts: `--limit N` (max total results, default 500), `--from`, `--to`, `--filter`, `--page-token` (resume from a prior response's `nextPageToken`), `--detail` (sleep).
 
 ## Discovery
 
@@ -138,6 +138,7 @@ ghealth data <type> list --help   # Flags for an operation
 ## Output
 
 - Responses are simplified by default: flat timestamps with UTC offset, compact source, no empty fields
+- JSON output always has the same shape for every read (`list`, `get`, `rollup`, `daily-rollup`, `reconcile`): an object `{"dataPoints": [...]}`, with optional `_hints` and `nextPageToken`. The rows are always under `dataPoints` — even for rollups and empty results — so `json.load(out)["dataPoints"]` always works
 - `--raw` returns the full API response
 - `--format csv` outputs flat CSV; nested objects are auto-flattened to dot-separated columns (e.g., `metricsSummary.caloriesKcal`)
 - `-o <file>` writes data to the file and prints **only** a summary to stdout (row count, column names, 3-row preview). Use this instead of piping (`> file`) — piping gives you the file but no schema on stdout

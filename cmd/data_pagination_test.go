@@ -22,14 +22,15 @@ import (
 
 // fakePages builds a fetchPage func that serves the given pages of point-counts.
 // Page i returns pages[i] points and a token "p{i+1}" unless it is the last
-// page, which returns "".
-func fakePages(pages []int) (func(string) ([]json.RawMessage, string, error), *int) {
+// page, which returns "". It ignores `want` (real fetchPage sizes the request to
+// want; collectPages' accumulation logic is independent of page sizing).
+func fakePages(pages []int) (func(string, int) ([]json.RawMessage, string, error), *int) {
 	calls := 0
 	tokens := map[string]int{"": 0}
 	for i := range pages {
 		tokens[tokenFor(i+1)] = i + 1
 	}
-	fn := func(token string) ([]json.RawMessage, string, error) {
+	fn := func(token string, want int) ([]json.RawMessage, string, error) {
 		calls++
 		idx := tokens[token]
 		if idx >= len(pages) {
@@ -55,7 +56,7 @@ func tokenFor(i int) string {
 func TestCollectPages_ExhaustsBeforeLimit(t *testing.T) {
 	// Three pages, server runs out before the limit is reached.
 	fn, calls := fakePages([]int{2, 2, 1})
-	pts, token, err := collectPages(100, listPageCap, fn)
+	pts, token, err := collectPages(100, listPageCap, "", fn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestCollectPages_StopsAtLimitAndSurfacesToken(t *testing.T) {
 	// token MUST be surfaced so the caller can tell the result was cut by
 	// --limit rather than exhausted (G9: silent truncation looked complete).
 	fn, calls := fakePages([]int{2, 2, 2, 2, 2})
-	pts, token, err := collectPages(5, listPageCap, fn)
+	pts, token, err := collectPages(5, listPageCap, "", fn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestCollectPages_ExactLimitNoMoreData(t *testing.T) {
 	// The limit is met exactly as the server runs out: a complete result,
 	// no token, no truncation signal.
 	fn, _ := fakePages([]int{3, 2})
-	pts, token, err := collectPages(5, listPageCap, fn)
+	pts, token, err := collectPages(5, listPageCap, "", fn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,6 +104,65 @@ func TestCollectPages_ExactLimitNoMoreData(t *testing.T) {
 	}
 	if token != "" {
 		t.Errorf("got remainingToken %q, want empty (data exhausted at limit)", token)
+	}
+}
+
+// collectPages must size each request to the rows still wanted, so the final
+// page lands on the --limit boundary and its token resumes losslessly.
+func TestCollectPages_PassesShrinkingWant(t *testing.T) {
+	var wants []int
+	fn := func(token string, want int) ([]json.RawMessage, string, error) {
+		wants = append(wants, want)
+		// Honor the request: return exactly `want` rows (within a 2-row cap, to
+		// model a per-type page cap) and always offer more.
+		n := want
+		if n > 2 {
+			n = 2
+		}
+		pts := make([]json.RawMessage, n)
+		for j := range pts {
+			pts[j] = json.RawMessage("{}")
+		}
+		return pts, "more", nil
+	}
+	pts, token, err := collectPages(5, listPageCap, "", fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pts) != 5 {
+		t.Errorf("got %d points, want exactly 5 (no overshoot past --limit)", len(pts))
+	}
+	if token != "more" {
+		t.Errorf("got token %q, want \"more\"", token)
+	}
+	// want must shrink toward the limit: 5, 3, 1 (2-row cap each page).
+	expected := []int{5, 3, 1}
+	if len(wants) != len(expected) {
+		t.Fatalf("requested %v, want %v", wants, expected)
+	}
+	for i := range expected {
+		if wants[i] != expected[i] {
+			t.Errorf("page %d requested want=%d, expected %d (got %v)", i, wants[i], expected[i], wants)
+		}
+	}
+}
+
+// A caller-supplied --page-token must seed the first fetch (resume).
+func TestCollectPages_StartTokenSeedsFirstFetch(t *testing.T) {
+	var firstToken string
+	seen := false
+	fn := func(token string, want int) ([]json.RawMessage, string, error) {
+		if !seen {
+			firstToken = token
+			seen = true
+		}
+		return nil, "", nil
+	}
+	if _, _, err := collectPages(10, listPageCap, "RESUME", fn); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if firstToken != "RESUME" {
+		t.Errorf("first fetch used token %q, want \"RESUME\"", firstToken)
 	}
 }
 
@@ -133,10 +193,10 @@ func TestCollectPages_TruncatedByCapSurfacesToken(t *testing.T) {
 	// cap and a large limit we must stop AND surface the continuation token so
 	// the caller knows the result is incomplete.
 	cap := 4
-	fn := func(token string) ([]json.RawMessage, string, error) {
+	fn := func(token string, want int) ([]json.RawMessage, string, error) {
 		return []json.RawMessage{json.RawMessage("{}")}, "more", nil
 	}
-	pts, token, err := collectPages(1000, cap, fn)
+	pts, token, err := collectPages(1000, cap, "", fn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,10 +210,10 @@ func TestCollectPages_TruncatedByCapSurfacesToken(t *testing.T) {
 
 func TestCollectPages_ErrorPropagates(t *testing.T) {
 	sentinel := errors.New("boom")
-	fn := func(token string) ([]json.RawMessage, string, error) {
+	fn := func(token string, want int) ([]json.RawMessage, string, error) {
 		return nil, "", sentinel
 	}
-	_, _, err := collectPages(10, listPageCap, fn)
+	_, _, err := collectPages(10, listPageCap, "", fn)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("got err %v, want sentinel propagated", err)
 	}

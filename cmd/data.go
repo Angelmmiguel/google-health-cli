@@ -15,10 +15,12 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,17 @@ import (
 	"ghealth/pkg/types"
 	"github.com/spf13/cobra"
 )
+
+// listMaxPageSize is the largest pageSize the API accepts for a data type's
+// list, from the registry (exercise/sleep are capped at 25, others 10000).
+// Requesting more than the cap is rejected, so list pagination sizes pages
+// within it. Falls back to the permissive default for an unknown type.
+func listMaxPageSize(dataType string) int {
+	if dt := types.Get(dataType); dt != nil {
+		return dt.MaxPageSize()
+	}
+	return 10000
+}
 
 // ─── Data Command ────────────────────────────────────────────────
 
@@ -334,6 +347,7 @@ type dataListOpts struct {
 	dataType    string
 	operation   string
 	limit       int
+	pageToken   string
 	from, to    string
 	sleepDetail bool
 }
@@ -345,19 +359,29 @@ type dataListOpts struct {
 const listPageCap = 1000
 
 // collectPages accumulates data points across pages until it has at least
-// `limit` points or the server stops returning a nextPageToken. fetchPage is
-// called with the page token ("" for the first page) and returns that page's
-// points and the token for the following page.
+// `limit` points or the server stops returning a nextPageToken. Pagination
+// begins from startToken ("" for the first page, or a caller-supplied
+// --page-token to resume). fetchPage is called with the page token and the
+// number of rows still wanted; it returns that page's points and the token for
+// the following page.
 //
-// The returned remainingToken is non-empty whenever pagination stopped with
-// the server still offering more data — either the user-requested limit was
-// met mid-stream or the page-cap safety net was hit. Only when the data is
-// genuinely exhausted is it "". Callers use it to signal incomplete results.
-func collectPages(limit, pageCap int, fetchPage func(pageToken string) ([]json.RawMessage, string, error)) (points []json.RawMessage, remainingToken string, err error) {
+// Passing `want` lets fetchPage size each request to the exact remainder (within
+// the API's per-type cap), so the final page lands on the --limit boundary and
+// the returned token resumes losslessly — no rows skipped, none repeated.
+//
+// The returned remainingToken is non-empty whenever pagination stopped with the
+// server still offering more data — the limit was reached or the page-cap safety
+// net was hit. Only when the data is genuinely exhausted is it "". Callers use
+// it to signal incomplete results and to support --page-token resumption.
+func collectPages(limit, pageCap int, startToken string, fetchPage func(pageToken string, want int) ([]json.RawMessage, string, error)) (points []json.RawMessage, remainingToken string, err error) {
 	var all []json.RawMessage
-	token := ""
+	token := startToken
 	for page := 0; page < pageCap; page++ {
-		pts, next, err := fetchPage(token)
+		want := limit - len(all)
+		if want <= 0 {
+			return all, token, nil
+		}
+		pts, next, err := fetchPage(token, want)
 		if err != nil {
 			return nil, "", err
 		}
@@ -394,12 +418,23 @@ func executeDataList(req *client.Request, opts dataListOpts) error {
 		totalLimit = 500 // sensible default cap
 	}
 
-	fetchPage := func(pageToken string) ([]json.RawMessage, string, error) {
+	maxPage := listMaxPageSize(opts.dataType)
+	fetchPage := func(pageToken string, want int) ([]json.RawMessage, string, error) {
+		if req.Query == nil {
+			req.Query = url.Values{}
+		}
+		// Request exactly the rows still needed (within the per-type cap) so the
+		// page boundary aligns with --limit and the surfaced nextPageToken
+		// resumes losslessly.
+		pageSize := want
+		if pageSize > maxPage {
+			pageSize = maxPage
+		}
+		req.Query.Set("pageSize", strconv.Itoa(pageSize))
 		if pageToken != "" {
-			if req.Query == nil {
-				req.Query = url.Values{}
-			}
 			req.Query.Set("pageToken", pageToken)
+		} else {
+			req.Query.Del("pageToken")
 		}
 		resp, err := c.Do(req)
 		if err != nil {
@@ -420,7 +455,7 @@ func executeDataList(req *client.Request, opts dataListOpts) error {
 		return pageData.DataPoints, pageData.NextPageToken, nil
 	}
 
-	allPoints, remainingToken, err := collectPages(totalLimit, listPageCap, fetchPage)
+	allPoints, remainingToken, err := collectPages(totalLimit, listPageCap, opts.pageToken, fetchPage)
 	if err != nil {
 		return err
 	}
@@ -444,8 +479,8 @@ func executeDataList(req *client.Request, opts dataListOpts) error {
 	if cappedByPageCap {
 		fmt.Fprintf(os.Stderr,
 			"warning: stopped after %d pages with more data still available; "+
-				"narrow --from/--to or pass --filter with the returned nextPageToken to continue\n",
-			listPageCap)
+				"continue with --page-token %s or narrow --from/--to\n",
+			listPageCap, remainingToken)
 	}
 	merged, _ := json.Marshal(mergedObj)
 
@@ -463,10 +498,12 @@ func executeDataList(req *client.Request, opts dataListOpts) error {
 		hints := output.GenerateHints(simplified, opts.dataType, opts.operation, totalLimit, opts.from, opts.to, opts.sleepDetail)
 		if truncated {
 			hints = append(hints, fmt.Sprintf(
-				"returned %d rows = --limit; more data exists — re-run with a higher --limit or a narrower --from/--to range",
-				totalLimit))
+				"returned %d rows = --limit; more data exists — fetch the next page with --page-token %s, "+
+					"or raise --limit / narrow --from/--to",
+				totalLimit, remainingToken))
 		}
 		simplified = output.InjectHints(simplified, hints)
+		simplified = output.EnsureEnvelope(simplified)
 	}
 
 	return printOutput(simplified)
@@ -498,6 +535,7 @@ func executeDataGet(req *client.Request, opts dataListOpts) error {
 	if !flagRaw {
 		hints := output.GenerateHints(simplified, opts.dataType, opts.operation, 0, "", "", opts.sleepDetail)
 		simplified = output.InjectHints(simplified, hints)
+		simplified = output.EnsureEnvelope(simplified)
 	}
 
 	return printOutput(simplified)
@@ -547,6 +585,7 @@ func executeDataRollup(req *client.Request, opts dataListOpts) error {
 	if !flagRaw {
 		hints := output.GenerateHints(body, opts.dataType, opts.operation, 0, opts.from, opts.to, opts.sleepDetail)
 		simplified = output.InjectHints(simplified, hints)
+		simplified = output.EnsureEnvelope(simplified)
 	}
 
 	return printOutput(simplified)
@@ -617,6 +656,7 @@ func newListCommand(dt *types.DataType) *cobra.Command {
 	var (
 		from, to, filter string
 		limit            int
+		pageToken        string
 		detail           bool
 	)
 	cmd := &cobra.Command{
@@ -643,6 +683,7 @@ func newListCommand(dt *types.DataType) *cobra.Command {
 				dataType:    dt.ID,
 				operation:   "list",
 				limit:       limit,
+				pageToken:   pageToken,
 				from:        from,
 				to:          to,
 				sleepDetail: detail,
@@ -653,6 +694,7 @@ func newListCommand(dt *types.DataType) *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "End date (inclusive of the named day): YYYY-MM-DD, ISO 8601, 'today', 'yesterday'")
 	cmd.Flags().StringVar(&filter, "filter", "", "Raw API filter (overrides --from/--to)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Max total results (default: 500)")
+	cmd.Flags().StringVar(&pageToken, "page-token", "", "Resume from a previous response's nextPageToken (fetches the next page losslessly)")
 	if dt.ID == "sleep" {
 		cmd.Flags().BoolVar(&detail, "detail", false, "Include per-stage time breakdown")
 	}
@@ -1070,16 +1112,23 @@ func newExportTCXCommand(dt *types.DataType) *cobra.Command {
 	var (
 		id         string
 		outputFile string
+		asFormat   string
 	)
 	cmd := &cobra.Command{
 		Use:   "export-tcx",
-		Short: fmt.Sprintf("Export %s as TCX", dt.ID),
+		Short: fmt.Sprintf("Export %s as TCX, or as a trackpoint CSV with --as csv", dt.ID),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if id == "" {
 				return client.NewValidationError("--id is required", "Provide the data point ID")
 			}
 			if outputFile == "" {
-				return client.NewValidationError("--output is required", "Provide the output file path")
+				return client.NewValidationError("--output is required", "Provide the output file path, or '-' for stdout")
+			}
+			if asFormat != "tcx" && asFormat != "csv" {
+				return client.NewValidationError(
+					fmt.Sprintf("invalid --as value: %s", asFormat),
+					"Use --as tcx (raw export) or --as csv (one row per trackpoint)",
+				)
 			}
 			req := &client.Request{
 				Method: "GET",
@@ -1101,17 +1150,56 @@ func newExportTCXCommand(dt *types.DataType) *cobra.Command {
 				}
 				return client.NewAPIError(0, err.Error(), "")
 			}
-			if err := os.WriteFile(outputFile, resp.Body, 0644); err != nil {
-				return client.NewValidationError(
-					fmt.Sprintf("failed to write file: %v", err),
-					"Check that the output directory exists and is writable",
-				)
+			payload := resp.Body
+			rows := -1
+			if asFormat == "csv" {
+				var buf bytes.Buffer
+				rows, err = output.WriteTCXAsCSV(resp.Body, &buf)
+				if err != nil {
+					return client.NewValidationError(
+						fmt.Sprintf("convert TCX to CSV: %v", err),
+						"Re-run with --as tcx to inspect the raw export",
+					)
+				}
+				payload = buf.Bytes()
 			}
-			fmt.Fprintf(os.Stderr, "Exported to %s\n", outputFile)
+			if outputFile == "-" {
+				if _, err := os.Stdout.Write(payload); err != nil {
+					return client.NewValidationError(fmt.Sprintf("write to stdout: %v", err), "")
+				}
+			} else {
+				if err := os.WriteFile(outputFile, payload, 0644); err != nil {
+					return client.NewValidationError(
+						fmt.Sprintf("failed to write file: %v", err),
+						"Check that the output directory exists and is writable",
+					)
+				}
+				if rows >= 0 {
+					// Schema peek: row count + header + first rows, so an agent
+					// learns the CSV shape without opening the file.
+					fmt.Fprintf(os.Stderr, "Exported %d trackpoint row(s) to %s\n%s", rows, outputFile, csvPeek(payload, 3))
+					if rows == 0 {
+						fmt.Fprintln(os.Stderr, "0 rows = no time-series track (indoor/no-sensor activity); session summary and notes are in 'data exercise list'.")
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "Exported to %s\n", outputFile)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "Data point ID (required)")
-	cmd.Flags().StringVar(&outputFile, "output", "", "Output file path (required)")
+	cmd.Flags().StringVar(&outputFile, "output", "", "Output file path (required; '-' writes to stdout)")
+	cmd.Flags().StringVar(&asFormat, "as", "tcx", "Output format: tcx (raw Google export) or csv (one row per trackpoint: time, lap, position, altitude, distance, heart rate; lap-less indoor activities yield a header-only CSV)")
 	return cmd
+}
+
+// csvPeek returns the header plus up to n data rows of a CSV payload, indented
+// for stderr display.
+func csvPeek(payload []byte, n int) string {
+	lines := strings.Split(strings.TrimRight(string(payload), "\n"), "\n")
+	if len(lines) > n+1 {
+		lines = lines[:n+1]
+	}
+	return "  " + strings.Join(lines, "\n  ") + "\n"
 }

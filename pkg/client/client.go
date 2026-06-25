@@ -122,6 +122,23 @@ func (c *Client) Do(req *Request) (*Response, error) {
 			continue
 		}
 
+		// 403 "insufficient authentication scopes": an access token can pass the
+		// local validity check yet already be expired server-side, because the
+		// oauth2 library treats a token as valid until ~10s before its expiry.
+		// Within that skew window the API may return this 403 rather than a 401
+		// (observed live: the first call after expiry returned it; the next
+		// succeeded). A genuine scope gap reproduces identically after a refresh,
+		// so one refresh+retry distinguishes a stale token from a real policy
+		// denial without masking the latter.
+		if resp.StatusCode == 403 && !refreshed && isStaleScopeError(resp) {
+			refreshed = true
+			if inv, ok := c.tokenSource.(auth.Invalidator); ok {
+				inv.Invalidate()
+			}
+			lastErr = parseAPIError(resp)
+			continue
+		}
+
 		// 429: honor Retry-After, retry
 		if resp.StatusCode == 429 {
 			nextDelay = parseRetryAfter(resp.Headers)
@@ -148,6 +165,16 @@ func (c *Client) Do(req *Request) (*Response, error) {
 		return nil, cliErr
 	}
 	return nil, NewNetworkError(fmt.Sprintf("request failed after %d attempts: %v", MaxRetries+1, lastErr))
+}
+
+// isStaleScopeError reports whether a 403 body is the "insufficient
+// authentication scopes" variant (ACCESS_TOKEN_SCOPE_INSUFFICIENT) — the form a
+// stale access token produces — rather than a policy denial. Only this variant
+// earns a one-shot refresh+retry.
+func isStaleScopeError(resp *Response) bool {
+	body := string(resp.Body)
+	return strings.Contains(body, "ACCESS_TOKEN_SCOPE_INSUFFICIENT") ||
+		strings.Contains(strings.ToLower(body), "insufficient authentication scopes")
 }
 
 // parseRetryAfter returns the delay requested by a Retry-After header, in either
