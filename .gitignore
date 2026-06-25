@@ -1,0 +1,10 @@
+/ghealth
+test_results/
+.test_results/
+*.exe
+dist/
+.env
+*.json
+!pkg/schema/bundled_snapshot.json
+.claude/
+.DS_Store
