@@ -388,6 +388,7 @@ Errors are always JSON on stderr and may include a `next_steps: []string` array 
 | `GHEALTH_CONFIG_DIR` | Config directory override |
 | `GHEALTH_PROFILE` | Active profile name |
 | `GHEALTH_FORMAT` | Default output format (json/table/csv) |
+| `GHEALTH_BASE_URL` | Override the API base URL |
 
 
 ## License

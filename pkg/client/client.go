@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -30,10 +31,18 @@ import (
 	"ghealth/pkg/auth"
 )
 
-const (
-	BaseURL    = "https://health.googleapis.com/v4"
-	MaxRetries = 3
-)
+const MaxRetries = 3
+
+var BaseURL = resolveBaseURL()
+
+const defaultBaseURL = "https://health.googleapis.com/v4"
+
+func resolveBaseURL() string {
+	if v := os.Getenv("GHEALTH_BASE_URL"); v != "" {
+		return v
+	}
+	return defaultBaseURL
+}
 
 // sleep is swappable so tests can run the retry loop without real backoff.
 var sleep = time.Sleep
