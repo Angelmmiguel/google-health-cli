@@ -35,7 +35,7 @@ Run `ghealth schema types` for the live version. Quick reference:
 - `calories-in-heart-rate-zone` → `caloriesInHeartRateZones` per day (rollup-only)
 
 **Use list for readings:**
-`heart-rate`, `weight` (writable), `body-fat` (writable), `height` (writable), `oxygen-saturation`, `heart-rate-variability`, `altitude`, `vo2-max`, `active-zone-minutes`, `activity-level`, `basal-energy-burned`, `active-energy-burned`, `blood-glucose`, `core-body-temperature`, `respiratory-rate-sleep-summary`, `run-vo2-max`, `sedentary-period`, `swim-lengths-data`, `hydration-log`
+`heart-rate`, `weight` (writable), `body-fat` (writable), `height` (writable), `oxygen-saturation`, `heart-rate-variability`, `altitude`, `vo2-max`, `active-zone-minutes`, `activity-level`, `basal-energy-burned`, `active-energy-burned`, `blood-glucose`, `core-body-temperature`, `respiratory-rate-sleep-summary`, `run-vo2-max`, `sedentary-period`, `swim-lengths-data`, `hydration-log` (writable)
 
 **Use list for sessions:**
 - `exercise` (writable) — includes type, duration, calories, HR summary, notes
@@ -46,7 +46,7 @@ Run `ghealth schema types` for the live version. Quick reference:
 - `irregular-rhythm-notification` — alert windows. **Requires `irn.readonly`.**
 
 **Nutrition:**
-- `nutrition-log` — logged food entries with nutrient/energy breakdown (list, get, rollup, daily-rollup, reconcile)
+- `nutrition-log` (writable) — logged food entries with nutrient/energy breakdown (list, get, create, update, delete, rollup, daily-rollup, reconcile)
 - `food`, `food-measurement-unit` — reference catalogs (list, get only). **No time filter** — `--from`/`--to` are ignored.
 
 **Daily summaries** (one value per day, filter by date):

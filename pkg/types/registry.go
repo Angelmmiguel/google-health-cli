@@ -457,7 +457,8 @@ func init() {
 		ID: "hydration-log", FilterName: "hydration_log", TimeField: interval,
 		Category:    "nutrition",
 		Description: "Hydration log entries",
-		Operations:  []string{"list", "get", "daily-rollup", "reconcile"},
+		Operations:  []string{"list", "get", "create", "update", "delete", "daily-rollup", "reconcile"},
+		Writable:    true,
 	})
 
 	// --- Rollup-only types (no list) ---
@@ -509,7 +510,8 @@ func init() {
 		ID: "nutrition-log", FilterName: "nutrition_log", TimeField: interval,
 		Category:    "nutrition",
 		Description: "Logged food/nutrition entries with nutrient and energy breakdown",
-		Operations:  []string{"list", "get", "rollup", "daily-rollup", "reconcile"},
+		Operations:  []string{"list", "get", "create", "update", "delete", "rollup", "daily-rollup", "reconcile"},
+		Writable:    true,
 	})
 	register(&DataType{
 		ID: "food", FilterName: "food", TimeField: TimeFieldNone,
